@@ -40,8 +40,51 @@ export const scrapSchema = z.object({
 });
 
 class VaccinationService {
-  private calculateNextVaccinationDate(vaccineId: string, lastDate: Date, doseNumber: number): Date | null {
-    return addMonths(lastDate, 1);
+  private async calculateNextVaccinationDate(
+    vaccineId: string,
+    lastDate: Date,
+    doseNumber: number,
+    planId?: string
+  ): Promise<Date | null> {
+    const vaccine = await prisma.vaccineCatalog.findUnique({
+      where: { id: vaccineId },
+      select: { standardDoseCount: true, doseIntervalDays: true, name: true },
+    });
+    if (!vaccine) return null;
+
+    if (vaccine.standardDoseCount === 1) {
+      return null;
+    }
+
+    if (doseNumber >= vaccine.standardDoseCount) {
+      return null;
+    }
+
+    let intervalDays = vaccine.doseIntervalDays;
+
+    if (planId) {
+      const nextPlan = await prisma.immunizationPlan.findFirst({
+        where: { vaccineId, doseNumber: doseNumber + 1 },
+        select: { intervalDays: true },
+      });
+      if (nextPlan && nextPlan.intervalDays > 0) {
+        intervalDays = nextPlan.intervalDays;
+      }
+    } else {
+      const nextPlan = await prisma.immunizationPlan.findFirst({
+        where: { vaccineId, doseNumber: doseNumber + 1 },
+        select: { intervalDays: true },
+      });
+      if (nextPlan && nextPlan.intervalDays > 0) {
+        intervalDays = nextPlan.intervalDays;
+      }
+    }
+
+    if (intervalDays <= 0) {
+      return null;
+    }
+
+    return addDays(lastDate, intervalDays);
   }
 
   async createVaccinationRecord(data: z.infer<typeof vaccinationSchema>) {
@@ -56,15 +99,20 @@ class VaccinationService {
     });
     if (!siteStock) throw new AppError('该接种点无此批次疫苗库存', 400);
 
+    const certificateNo = `CERT${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const adminDate = data.administrationDate || new Date();
+    const nextDate = await this.calculateNextVaccinationDate(
+      data.vaccineId,
+      adminDate,
+      data.doseNumber,
+      data.planId
+    );
+
     return prisma.$transaction(async (tx) => {
       await tx.inventoryStock.update({
         where: { id: siteStock.id },
         data: { quantity: { decrement: 1 }, lastUpdated: new Date() },
       });
-
-      const certificateNo = `CERT${Date.now()}${Math.floor(Math.random() * 1000)}`;
-      const adminDate = data.administrationDate || new Date();
-      const nextDate = this.calculateNextVaccinationDate(data.vaccineId, adminDate, data.doseNumber);
 
       const record = await tx.vaccinationRecord.create({
         data: {

@@ -20,8 +20,8 @@ export const appointmentUpdateSchema = z.object({
 });
 
 class AppointmentService {
-  private calculateChildAgeMonths(birthDate: Date): number {
-    return differenceInMonths(new Date(), birthDate);
+  private calculateChildAgeMonths(birthDate: Date, atDate: Date = new Date()): number {
+    return differenceInMonths(atDate, birthDate);
   }
 
   async getPreviousVaccinationDate(childId: string, vaccineId: string): Promise<Date | null> {
@@ -32,14 +32,19 @@ class AppointmentService {
     return record ? record.administrationDate : null;
   }
 
-  async checkImmunizationCompliance(childId: string, vaccineId: string, planId?: string): Promise<{ compliant: boolean; reason?: string; plan?: { minAge: number; maxAge?: number; intervalDays: number } }> {
+  async checkImmunizationCompliance(
+    childId: string,
+    vaccineId: string,
+    planId?: string,
+    appointmentDate: Date = new Date()
+  ): Promise<{ compliant: boolean; reason?: string; plan?: { minAge: number; maxAge?: number; intervalDays: number } }> {
     const child = await prisma.child.findUnique({ where: { id: childId } });
     if (!child) return { compliant: false, reason: '儿童信息不存在' };
 
     const vaccine = await prisma.vaccineCatalog.findUnique({ where: { id: vaccineId } });
     if (!vaccine) return { compliant: false, reason: '疫苗信息不存在' };
 
-    const ageMonths = this.calculateChildAgeMonths(child.birthDate);
+    const ageMonths = this.calculateChildAgeMonths(child.birthDate, appointmentDate);
 
     let plan: any = null;
     if (planId) {
@@ -56,7 +61,7 @@ class AppointmentService {
 
     if (!plan) {
       if (ageMonths < vaccine.suitableAgeMonths) {
-        return { compliant: false, reason: `儿童年龄${ageMonths}月，未达到${vaccine.suitableAgeMonths}月接种年龄要求` };
+        return { compliant: false, reason: `儿童年龄${ageMonths}月，预约当日未达到${vaccine.suitableAgeMonths}月接种年龄要求` };
       }
       if (vaccine.maxAgeMonths && ageMonths > vaccine.maxAgeMonths) {
         return { compliant: false, reason: `儿童年龄${ageMonths}月，已超出${vaccine.maxAgeMonths}月最大接种年龄` };
@@ -65,7 +70,7 @@ class AppointmentService {
     }
 
     if (ageMonths < plan.minAgeMonths) {
-      return { compliant: false, reason: `儿童年龄${ageMonths}月，未达到该剂次${plan.minAgeMonths}月龄要求` };
+      return { compliant: false, reason: `儿童年龄${ageMonths}月，预约当日未达到该剂次${plan.minAgeMonths}月龄要求` };
     }
     if (plan.maxAgeMonths && ageMonths > plan.maxAgeMonths) {
       return { compliant: false, reason: `儿童年龄${ageMonths}月，已超出该剂次${plan.maxAgeMonths}月龄限制` };
@@ -73,9 +78,13 @@ class AppointmentService {
 
     const lastVaccination = await this.getPreviousVaccinationDate(childId, vaccineId);
     if (lastVaccination && plan.intervalDays > 0) {
-      const interval = Math.floor((new Date().getTime() - lastVaccination.getTime()) / (1000 * 60 * 60 * 24));
+      const interval = Math.floor((appointmentDate.getTime() - lastVaccination.getTime()) / (1000 * 60 * 60 * 24));
       if (interval < plan.intervalDays) {
-        return { compliant: false, reason: `与前一针间隔${interval}天，未达到${plan.intervalDays}天最小间隔要求` };
+        const diffDays = plan.intervalDays - interval;
+        return {
+          compliant: false,
+          reason: `与前一针间隔${interval}天（按预约日期计算），未达到${plan.intervalDays}天最小间隔要求，还差${diffDays}天`,
+        };
       }
     }
 
@@ -185,7 +194,7 @@ class AppointmentService {
   }
 
   async createAppointment(data: z.infer<typeof appointmentCreateSchema>, createdBy: string) {
-    const compliance = await this.checkImmunizationCompliance(data.childId, data.vaccineId, data.planId);
+    const compliance = await this.checkImmunizationCompliance(data.childId, data.vaccineId, data.planId, data.appointmentDate);
     if (!compliance.compliant) {
       throw new AppError(`接种合规校验失败：${compliance.reason}`, 400);
     }

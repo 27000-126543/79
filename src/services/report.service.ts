@@ -35,23 +35,54 @@ class ReportService {
       },
     });
 
-    const totalUsed = await prisma.inventoryLog.aggregate({
-      where: {
-        action: 'VACCINATION',
-        timestamp: { gte: dayStart, lte: dayEnd },
-      },
-      _sum: { quantity: true },
-    });
+    const totalUsedQty = vaccinatedCount;
 
-    const totalScrapped = await prisma.scrappedRecord.aggregate({
-      where: {
-        scrapDate: { gte: dayStart, lte: dayEnd },
-      },
-      _sum: { quantity: true },
-    });
+    let totalScrappedQty = 0;
+    if (siteIds.length > 0) {
+      const scrappedInScope = await prisma.scrappedRecord.findMany({
+        where: {
+          scrapDate: { gte: dayStart, lte: dayEnd },
+        },
+        include: { batch: true },
+      });
 
-    const lossRate = (totalUsed._sum.quantity || 0) > 0
-      ? ((totalScrapped._sum.quantity || 0) / (totalUsed._sum.quantity! + (totalScrapped._sum.quantity || 0))) * 100
+      for (const scrapped of scrappedInScope) {
+        const siteStocks = await prisma.inventoryStock.findMany({
+          where: { batchId: scrapped.batchId, siteId: { in: siteIds } },
+          select: { quantity: true },
+        });
+        if (siteStocks.length === 0) continue;
+
+        const siteStockQty = siteStocks.reduce((s, i) => s + i.quantity, 0);
+        const allStock = await prisma.inventoryStock.aggregate({
+          where: { batchId: scrapped.batchId },
+          _sum: { quantity: true },
+        });
+        const totalSiteStockQty = allStock._sum.quantity || 1;
+
+        const ratio = totalSiteStockQty > 0 ? siteStockQty / totalSiteStockQty : 0;
+        totalScrappedQty += Math.round(scrapped.quantity * ratio);
+      }
+    } else if (region) {
+      const scrappedInRegion = await prisma.scrappedRecord.findMany({
+        where: {
+          scrapDate: { gte: dayStart, lte: dayEnd },
+        },
+        include: { batch: { include: { storageSlot: { include: { coldStorage: true } } } } },
+      });
+      totalScrappedQty = scrappedInRegion
+        .filter((r) => r.batch.storageSlot?.coldStorage?.region === region)
+        .reduce((s, r) => s + r.quantity, 0);
+    } else {
+      const allScrapped = await prisma.scrappedRecord.aggregate({
+        where: { scrapDate: { gte: dayStart, lte: dayEnd } },
+        _sum: { quantity: true },
+      });
+      totalScrappedQty = allScrapped._sum.quantity || 0;
+    }
+
+    const lossRate = totalUsedQty > 0
+      ? (totalScrappedQty / (totalUsedQty + totalScrappedQty)) * 100
       : 0;
 
     const adverseCount = await prisma.adverseReactionReport.count({
@@ -80,7 +111,8 @@ class ReportService {
       equipmentGoodRate: Math.round(equipmentGoodRate * 100) / 100,
       details: {
         vaccinatedBySite: [] as any[],
-        scrappedQty: totalScrapped._sum.quantity || 0,
+        scrappedQty: totalScrappedQty,
+        usedQty: totalUsedQty,
         adverseCount,
         equipmentTotal: totalEquipment,
         equipmentGood: goodEquipment,

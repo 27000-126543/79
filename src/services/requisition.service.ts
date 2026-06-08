@@ -175,7 +175,7 @@ class RequisitionService {
   async approveRequisition(requisitionId: string, data: z.infer<typeof requisitionApproveSchema>, approverId: string) {
     const requisition = await prisma.vaccineRequisition.findUnique({
       where: { id: requisitionId },
-      include: { items: true, site: true },
+      include: { items: { include: { vaccine: true } }, site: true },
     });
     if (!requisition) throw new AppError('申领单不存在', 404);
     if (requisition.status !== 'PENDING') throw new AppError('申领单状态不允许审批', 400);
@@ -187,6 +187,34 @@ class RequisitionService {
         ? vehicleValidation.mismatchVaccines.map((v) => `${v.name}需要${this.translateZone(v.requiredZone)}`).join('，')
         : '车辆不存在';
       throw new AppError(`运输车辆温区校验失败：${suggestions}`, 400);
+    }
+
+    for (const item of data.items) {
+      if (item.approvedQty > 0) {
+        if (!item.batchId) {
+          const reqItem = requisition.items.find((ri) => ri.id === item.requisitionItemId);
+          throw new AppError(
+            `疫苗 ${reqItem?.vaccine?.name || reqItem?.vaccineId || '未知'} 请指定要发放的批次`,
+            400
+          );
+        }
+        const batch = await prisma.vaccineBatch.findUnique({
+          where: { id: item.batchId },
+          include: { vaccine: true },
+        });
+        if (!batch) {
+          throw new AppError(`批次ID ${item.batchId} 不存在`, 400);
+        }
+        if (batch.status === InventoryStatus.SCRAPPED || batch.status === InventoryStatus.EXPIRED) {
+          throw new AppError(`批次 ${batch.batchNumber}（${batch.vaccine.name}）状态为${batch.status}，不可发放`, 400);
+        }
+        if (batch.availableQuantity < item.approvedQty) {
+          throw new AppError(
+            `批次 ${batch.batchNumber}（${batch.vaccine.name}）可用库存不足，当前可用${batch.availableQuantity}剂，申请发放${item.approvedQty}剂`,
+            400
+          );
+        }
+      }
     }
 
     return await prisma.$transaction(async (tx) => {
@@ -207,13 +235,35 @@ class RequisitionService {
         });
 
         if (item.approvedQty > 0 && item.batchId) {
-          const batch = await tx.vaccineBatch.findUnique({ where: { id: item.batchId } });
-          if (batch && batch.availableQuantity >= item.approvedQty) {
-            await tx.vaccineBatch.update({
-              where: { id: item.batchId },
-              data: { availableQuantity: { decrement: item.approvedQty }, status: InventoryStatus.IN_TRANSIT },
-            });
+          const updateResult = await tx.vaccineBatch.updateMany({
+            where: {
+              id: item.batchId,
+              availableQuantity: { gte: item.approvedQty },
+            },
+            data: {
+              availableQuantity: { decrement: item.approvedQty },
+              status: InventoryStatus.IN_TRANSIT,
+            },
+          });
+
+          if (updateResult.count === 0) {
+            const batch = await tx.vaccineBatch.findUnique({ where: { id: item.batchId }, include: { vaccine: true } });
+            throw new AppError(
+              `批次 ${batch?.batchNumber || item.batchId} 库存并发更新失败，当前可用${batch?.availableQuantity ?? 0}剂，请重试`,
+              409
+            );
           }
+
+          await tx.inventoryLog.create({
+            data: {
+              batchId: item.batchId,
+              action: 'ALLOCATED_TO_DELIVERY',
+              quantity: item.approvedQty,
+              location: delivery.deliveryNo,
+              operatorId: approverId,
+              reason: `申领单${requisition.requisitionNo}审批通过，转配送中`,
+            },
+          });
         }
       }
 

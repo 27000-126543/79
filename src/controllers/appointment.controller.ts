@@ -33,7 +33,12 @@ export const appointmentController = {
       appointmentService.checkSiteCapacity(siteId as string, d, '09:00'),
       vaccineId ? appointmentService.checkInventory(siteId as string, vaccineId as string) : Promise.resolve(null),
       childId && vaccineId
-        ? appointmentService.checkImmunizationCompliance(childId as string, vaccineId as string, planId as string | undefined)
+        ? appointmentService.checkImmunizationCompliance(
+            childId as string,
+            vaccineId as string,
+            planId as string | undefined,
+            d
+          )
         : Promise.resolve(null),
       appointmentService.getRecommendedTimeSlots(siteId as string, d),
     ]);

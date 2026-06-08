@@ -70,7 +70,9 @@ class IncomingService {
 
     const slotAssignment = await this.assignStorageSlot(tempZone, region);
     if (!slotAssignment) {
-      throw new AppError(`无可用的${this.translateZone(tempZone)}库位，请检查冷库配置`, 503);
+      const zoneName = this.translateZone(tempZone);
+      const regionHint = region ? `（区域: ${region}）` : '（全区域）';
+      throw new AppError(`无可用的${zoneName}库位${regionHint}，请检查对应冷库是否已配置${zoneName}区库位或库位已全部占用`, 503);
     }
 
     return await prisma.$transaction(async (tx) => {
