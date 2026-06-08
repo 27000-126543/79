@@ -95,6 +95,9 @@ class DeliveryService {
     if (!activeEvent) return;
 
     const resolvedAt = new Date();
+    const recoveredAt = resolvedAt;
+    const log = await prisma.temperatureLog.findUnique({ where: { id: logId } });
+    const recoveredTemperature = log?.temperature;
     const durationMinutes = Math.max(0, differenceInMinutes(resolvedAt, activeEvent.firstAlertAt));
 
     await prisma.temperatureAlertEvent.update({
@@ -102,6 +105,8 @@ class DeliveryService {
       data: {
         status: TemperatureAlertEventStatus.RESOLVED,
         resolvedAt,
+        recoveredAt,
+        recoveredTemperature,
         durationMinutes,
         lastAlertAt: resolvedAt,
         temperatureLogs: { connect: { id: logId } },
@@ -112,6 +117,8 @@ class DeliveryService {
       eventNo: activeEvent.eventNo,
       deliveryId,
       resolvedAt,
+      recoveredAt,
+      recoveredTemperature,
       durationMinutes,
     });
 
@@ -119,8 +126,8 @@ class DeliveryService {
       await notificationService.notifyCDC(
         NotificationType.TEMPERATURE_ALERT,
         '冷链运输温度已恢复正常',
-        `配送${deliveryId}温度恢复正常，异常持续${durationMinutes}分钟，事件号${activeEvent.eventNo}`,
-        { deliveryId, eventId: activeEvent.id, eventNo: activeEvent.eventNo, durationMinutes }
+        `配送${deliveryId}温度恢复${recoveredTemperature ?? '未知'}°C，异常持续${durationMinutes}分钟，事件号${activeEvent.eventNo}`,
+        { deliveryId, eventId: activeEvent.id, eventNo: activeEvent.eventNo, durationMinutes, recoveredTemperature }
       );
     }
   }
@@ -143,7 +150,7 @@ class DeliveryService {
     if (!delivery) return null;
 
     const now = new Date();
-    const affectedBatchIds = batchId
+    const newAffectedBatchIds = batchId
       ? [batchId]
       : delivery.requisition?.items.filter((i) => i.batchId).map((i) => i.batchId as string) || [];
 
@@ -159,7 +166,12 @@ class DeliveryService {
     let event: any;
 
     if (existingActiveEvent) {
+      const existingBatchIds: string[] = Array.isArray((existingActiveEvent as any).affectedBatchIds)
+        ? (existingActiveEvent as any).affectedBatchIds
+        : [];
+      const mergedBatchIds = Array.from(new Set([...existingBatchIds, ...newAffectedBatchIds]));
       const durationMinutes = Math.max(0, differenceInMinutes(now, existingActiveEvent.firstAlertAt));
+
       event = await prisma.temperatureAlertEvent.update({
         where: { id: existingActiveEvent.id },
         data: {
@@ -168,6 +180,7 @@ class DeliveryService {
           lastAlertAt: now,
           durationMinutes,
           logCount: { increment: 1 },
+          affectedBatchIds: mergedBatchIds as any,
           temperatureLogs: { connect: { id: logId } },
         },
         include: { emergencyOrder: true },
@@ -181,9 +194,16 @@ class DeliveryService {
         maxTemperature: event.maxTemperature,
         durationMinutes,
         logCount: event.logCount,
+        affectedBatchIds: mergedBatchIds,
       });
     } else {
       const eventNo = `TAE${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+      const autoOperator = await prisma.user.findFirst({
+        where: { role: 'CDC_ADMIN' },
+        select: { id: true },
+      });
+      if (!autoOperator) throw new AppError('系统中未配置CDC管理员，无法自动生成应急工单', 500);
 
       const order = await this.createEmergencyOrder(
         {
@@ -194,7 +214,7 @@ class DeliveryService {
           reason: `温度异常：当前${temperature}°C，阈值范围${threshold.min}°C~${threshold.max}°C`,
           batchId: undefined,
         },
-        'system'
+        autoOperator.id
       );
 
       event = await prisma.temperatureAlertEvent.create({
@@ -208,7 +228,7 @@ class DeliveryService {
           lastAlertAt: now,
           durationMinutes: 0,
           logCount: 1,
-          affectedBatchIds: affectedBatchIds as any,
+          affectedBatchIds: newAffectedBatchIds as any,
           status: TemperatureAlertEventStatus.ACTIVE,
           emergencyOrderId: (order as { id: string }).id,
           temperatureLogs: { connect: { id: logId } },
@@ -261,6 +281,7 @@ class DeliveryService {
         delivery: { include: { vehicle: true, requisition: { include: { site: true } } } },
         emergencyOrder: true,
         temperatureLogs: { orderBy: { timestamp: 'asc' } },
+        handler: { select: { id: true, name: true } },
       },
       orderBy: { firstAlertAt: 'desc' },
     });
@@ -273,6 +294,8 @@ class DeliveryService {
       firstAlertAt: e.firstAlertAt,
       lastAlertAt: e.lastAlertAt,
       resolvedAt: e.resolvedAt,
+      recoveredAt: e.recoveredAt,
+      recoveredTemperature: e.recoveredTemperature,
       durationMinutes: e.resolvedAt
         ? Math.max(0, differenceInMinutes(e.resolvedAt, e.firstAlertAt))
         : e.durationMinutes,
@@ -281,6 +304,9 @@ class DeliveryService {
       status: e.status,
       handlingStatus: e.handlingStatus,
       remark: e.remark,
+      handlingRemark: e.handlingRemark,
+      handledAt: e.handledAt,
+      handledBy: e.handler,
       emergencyOrder: e.emergencyOrder
         ? { id: e.emergencyOrder.id, orderNo: e.emergencyOrder.orderNo, type: e.emergencyOrder.type, status: e.emergencyOrder.status }
         : null,
@@ -321,6 +347,7 @@ class DeliveryService {
   ) {
     const event = await prisma.temperatureAlertEvent.findUnique({
       where: { id: eventId },
+      include: { handler: { select: { id: true, name: true } } },
     });
     if (!event) throw new AppError('温度异常事件不存在', 404);
 
@@ -329,19 +356,25 @@ class DeliveryService {
       include: { requisition: { include: { site: true } } },
     });
 
-    const data: any = { handlingStatus };
-    if (remark !== undefined) data.remark = remark;
+    const now = new Date();
+    const data: any = { handlingStatus, handledBy: operatorId, handledAt: now };
+    if (remark !== undefined) data.handlingRemark = remark;
 
     const updated = await prisma.temperatureAlertEvent.update({
       where: { id: eventId },
       data,
-      include: { emergencyOrder: true },
+      include: {
+        emergencyOrder: true,
+        handler: { select: { id: true, name: true } },
+      },
     });
 
     wsService.sendStatusChange('temperature_alert_event', eventId, handlingStatus, {
       eventNo: event.eventNo,
       handlingStatus,
-      remark,
+      handledBy: operatorId,
+      handledAt: now,
+      handlingRemark: remark,
     });
 
     if (deliveryInfo?.requisition?.site.region) {
@@ -349,8 +382,8 @@ class DeliveryService {
         deliveryInfo.requisition.site.region,
         NotificationType.EMERGENCY_ALERT,
         `温度异常事件处理状态更新：${handlingStatus}`,
-        `事件号${event.eventNo}处理状态已更新为${handlingStatus}`,
-        { eventId, eventNo: event.eventNo, handlingStatus }
+        `事件号${event.eventNo}处理状态已更新为${handlingStatus}${remark ? `，处理说明：${remark}` : ''}`,
+        { eventId, eventNo: event.eventNo, handlingStatus, handledBy: operatorId, handlingRemark: remark }
       );
     }
 
@@ -425,7 +458,7 @@ class DeliveryService {
   async completeDelivery(deliveryId: string) {
     const delivery = await prisma.delivery.findUnique({
       where: { id: deliveryId },
-      include: { requisition: { include: { items: true, site: true } } },
+      include: { requisition: { include: { items: { include: { vaccine: true, batch: true } }, site: true } } },
     });
     if (!delivery || !delivery.requisition) throw new AppError('配送或关联申领不存在', 404);
 
@@ -433,42 +466,76 @@ class DeliveryService {
     const deliveryNo = delivery.deliveryNo;
     const siteRegion = requisition.site.region;
 
+    for (const item of requisition.items) {
+      if (item.approvedQty && item.approvedQty > 0 && !item.batchId) {
+        throw new AppError(
+          `申领明细 ${item.id}（${item.vaccine.name}）未指定发放批次，无法完成签收，请先在审批时指定批次`,
+          400
+        );
+      }
+    }
+
     return await prisma.$transaction(async (tx) => {
       for (const item of requisition.items) {
-        if (item.approvedQty && item.approvedQty > 0) {
-          const vaccineBatches = await tx.vaccineBatch.findMany({
-            where: { vaccineId: item.vaccineId, status: 'IN_TRANSIT', availableQuantity: { gt: 0 } },
-            take: 1,
-          });
+        if (!item.approvedQty || item.approvedQty <= 0 || !item.batchId) continue;
 
-          if (vaccineBatches.length > 0) {
-            const batch = vaccineBatches[0];
-            const existingStock = await tx.inventoryStock.findFirst({
-              where: { siteId: requisition.siteId, batchId: batch.id },
-            });
-
-            if (existingStock) {
-              await tx.inventoryStock.update({
-                where: { id: existingStock.id },
-                data: { quantity: { increment: item.approvedQty }, lastUpdated: new Date() },
-              });
-            } else {
-              await tx.inventoryStock.create({
-                data: {
-                  siteId: requisition.siteId,
-                  batchId: batch.id,
-                  quantity: item.approvedQty,
-                  status: 'NORMAL',
-                },
-              });
-            }
-
-            await tx.requisitionItem.update({
-              where: { id: item.id },
-              data: { deliveredQty: item.approvedQty },
-            });
-          }
+        const batch = await tx.vaccineBatch.findUnique({
+          where: { id: item.batchId },
+          include: { vaccine: true },
+        });
+        if (!batch) {
+          throw new AppError(
+            `批次 ${item.batchId}（${item.vaccine.name}）不存在，无法完成签收`,
+            404
+          );
         }
+        if (batch.status !== 'IN_TRANSIT') {
+          throw new AppError(
+            `批次 ${batch.batchNumber}（${batch.vaccine.name}）状态为 ${batch.status}，不是在途状态，无法签收`,
+            400
+          );
+        }
+
+        const existingStock = await tx.inventoryStock.findFirst({
+          where: { siteId: requisition.siteId, batchId: item.batchId },
+        });
+
+        if (existingStock) {
+          await tx.inventoryStock.update({
+            where: { id: existingStock.id },
+            data: { quantity: { increment: item.approvedQty }, status: 'NORMAL', lastUpdated: new Date() },
+          });
+        } else {
+          await tx.inventoryStock.create({
+            data: {
+              siteId: requisition.siteId,
+              batchId: item.batchId,
+              quantity: item.approvedQty,
+              status: 'NORMAL',
+            },
+          });
+        }
+
+        const remainingQty = batch.availableQuantity - item.approvedQty;
+        if (remainingQty > 0) {
+          await tx.vaccineBatch.update({
+            where: { id: item.batchId },
+            data: {
+              availableQuantity: remainingQty,
+              status: remainingQty > 0 ? batch.status : 'NORMAL',
+            },
+          });
+        } else {
+          await tx.vaccineBatch.update({
+            where: { id: item.batchId },
+            data: { availableQuantity: 0, status: 'NORMAL' },
+          });
+        }
+
+        await tx.requisitionItem.update({
+          where: { id: item.id },
+          data: { deliveredQty: item.approvedQty },
+        });
       }
 
       const updated = await tx.delivery.update({

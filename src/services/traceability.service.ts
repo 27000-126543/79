@@ -157,7 +157,7 @@ class TraceabilityService {
         events.push({
           timestamp: req.updatedAt,
           eventType: 'REQUISITION_APPROVED',
-          description: `申领审批通过：申领单 ${req.requisitionNo}，发放 ${item.approvedQty ?? 0}剂 → ${req.site.name}`,
+          description: `申领审批通过：申领单 ${req.requisitionNo}，发放 ${item.approvedQty ?? 0}剂 → ${req.site.name}（审批人：${req.approver.name}）`,
           operator: req.approver,
           location: req.site.name,
           details: {
@@ -194,18 +194,52 @@ class TraceabilityService {
           });
         }
 
-        for (const tlog of del.temperatureLogs) {
+        const alertEvents = await prisma.temperatureAlertEvent.findMany({
+          where: { deliveryId: del.id },
+          include: { emergencyOrder: true },
+          orderBy: { firstAlertAt: 'asc' },
+        });
+
+        for (const ae of alertEvents) {
+          events.push({
+            timestamp: ae.firstAlertAt,
+            eventType: 'TEMPERATURE_ALERT',
+            description: `运输温度异常事件（${ae.eventNo}）：${ae.alertType}，最低 ${ae.minTemperature}°C / 最高 ${ae.maxTemperature}°C，持续 ${ae.durationMinutes} 分钟，状态：${ae.status}/${ae.handlingStatus}${ae.resolvedAt ? '，已恢复' : ''}`,
+            details: {
+              eventId: ae.id,
+              eventNo: ae.eventNo,
+              alertType: ae.alertType,
+              minTemperature: ae.minTemperature,
+              maxTemperature: ae.maxTemperature,
+              firstAlertAt: ae.firstAlertAt,
+              lastAlertAt: ae.lastAlertAt,
+              resolvedAt: ae.resolvedAt,
+              recoveredAt: ae.recoveredAt,
+              recoveredTemperature: ae.recoveredTemperature,
+              durationMinutes: ae.durationMinutes,
+              logCount: ae.logCount,
+              affectedBatchIds: ae.affectedBatchIds,
+              status: ae.status,
+              handlingStatus: ae.handlingStatus,
+              handlingRemark: ae.handlingRemark,
+              emergencyOrder: ae.emergencyOrder
+                ? { id: ae.emergencyOrder.id, orderNo: ae.emergencyOrder.orderNo, type: ae.emergencyOrder.type, status: ae.emergencyOrder.status }
+                : null,
+            },
+            eventRef: { type: 'TEMPERATURE_ALERT_EVENT', id: ae.id, no: ae.eventNo },
+          });
+        }
+
+        const normalLogs = del.temperatureLogs.filter((t) => !t.isAlert);
+        for (const tlog of normalLogs) {
           events.push({
             timestamp: tlog.timestamp,
-            eventType: tlog.isAlert ? 'TEMPERATURE_ALERT' : 'TEMPERATURE_LOG',
-            description: tlog.isAlert
-              ? `运输温度异常：${tlog.temperature}°C（${tlog.alertType}）`
-              : `运输温度记录：${tlog.temperature}°C`,
+            eventType: 'TEMPERATURE_LOG',
+            description: `运输温度记录：${tlog.temperature}°C`,
             details: {
               deliveryId: del.id,
               temperature: tlog.temperature,
-              isAlert: tlog.isAlert,
-              alertType: tlog.alertType,
+              isAlert: false,
               equipmentId: tlog.equipmentId,
             },
           });
@@ -224,12 +258,16 @@ class TraceabilityService {
           events.push({
             timestamp: del.arrivalTime,
             eventType: 'SITE_RECEIVED',
-            description: `接种点入库：${req.site.name} 收到 ${item.approvedQty ?? 0}剂 ${batch.vaccine.name}（批次 ${batch.batchNumber}）`,
+            description: `接种点入库：${req.site.name} 收到 ${item.approvedQty ?? 0}剂 ${batch.vaccine.name}（批次 ${batch.batchNumber}，审批单号 ${req.requisitionNo}）`,
             location: req.site.name,
             details: {
               siteId: req.siteId,
               siteName: req.site.name,
               quantity: item.approvedQty ?? item.deliveredQty ?? 0,
+              batchId: batch.id,
+              batchNumber: batch.batchNumber,
+              requisitionNo: req.requisitionNo,
+              deliveryNo: del.deliveryNo,
             },
           });
         }
@@ -320,19 +358,20 @@ class TraceabilityService {
 
     const batchTrace = await this.getBatchTraceability(undefined, record.batchId);
 
-    const deliveryInfo = await prisma.requisitionItem.findFirst({
+    const requisitionItem = await prisma.requisitionItem.findFirst({
       where: { batchId: record.batchId },
       include: {
         requisition: {
           include: {
             site: true,
+            approver: { select: { id: true, name: true } },
             delivery: {
               include: {
                 vehicle: true,
                 driver: { select: { id: true, name: true } },
-                temperatureLogs: {
-                  where: { isAlert: true },
-                  orderBy: { timestamp: 'asc' },
+                temperatureAlertEvents: {
+                  include: { emergencyOrder: true, handler: { select: { id: true, name: true } } },
+                  orderBy: { firstAlertAt: 'asc' },
                 },
               },
             },
@@ -340,6 +379,19 @@ class TraceabilityService {
         },
       },
     });
+
+    const alertEvents = requisitionItem?.requisition?.delivery?.temperatureAlertEvents ?? [];
+    const hasActiveAlert = alertEvents.some((e) => e.status === 'ACTIVE');
+    const hasAnyAlert = alertEvents.length > 0;
+    const latestClosedHandling = alertEvents.find((e) => e.handlingStatus === 'CLOSED' || e.handlingStatus === 'ACTION_TAKEN');
+    const emergencyOrders = alertEvents
+      .filter((e) => !!e.emergencyOrder)
+      .map((e) => e.emergencyOrder) as any[];
+    const allowUse = !hasActiveAlert;
+    const temperatureSafetyStatus: 'SAFE' | 'RECOVERED' | 'PENDING_REVIEW' | 'RISK_ACTIVE' =
+      !hasAnyAlert ? 'SAFE' :
+      hasActiveAlert ? 'RISK_ACTIVE' :
+      latestClosedHandling ? 'RECOVERED' : 'PENDING_REVIEW';
 
     return {
       certificate: {
@@ -356,30 +408,69 @@ class TraceabilityService {
         remarks: record.remarks,
       },
       batch: batchTrace.batch,
-      delivery: deliveryInfo?.requisition?.delivery
+      delivery: requisitionItem?.requisition?.delivery
         ? {
-            deliveryNo: deliveryInfo.requisition.delivery.deliveryNo,
-            departureTime: deliveryInfo.requisition.delivery.departureTime,
-            arrivalTime: deliveryInfo.requisition.delivery.arrivalTime,
-            vehicle: deliveryInfo.requisition.delivery.vehicle
+            deliveryNo: requisitionItem.requisition.delivery.deliveryNo,
+            departureTime: requisitionItem.requisition.delivery.departureTime,
+            arrivalTime: requisitionItem.requisition.delivery.arrivalTime,
+            status: requisitionItem.requisition.delivery.status,
+            vehicle: requisitionItem.requisition.delivery.vehicle
               ? {
-                  id: deliveryInfo.requisition.delivery.vehicle.id,
-                  plateNumber: deliveryInfo.requisition.delivery.vehicle.plateNumber,
+                  id: requisitionItem.requisition.delivery.vehicle.id,
+                  plateNumber: requisitionItem.requisition.delivery.vehicle.plateNumber,
                   temperatureRange: {
-                    min: deliveryInfo.requisition.delivery.vehicle.minTemperature,
-                    max: deliveryInfo.requisition.delivery.vehicle.maxTemperature,
+                    min: requisitionItem.requisition.delivery.vehicle.minTemperature,
+                    max: requisitionItem.requisition.delivery.vehicle.maxTemperature,
                   },
                 }
               : null,
-            driver: deliveryInfo.requisition.delivery.driver,
-            temperatureAlerts: deliveryInfo.requisition.delivery.temperatureLogs.map((t) => ({
-              timestamp: t.timestamp,
-              temperature: t.temperature,
-              alertType: t.alertType,
+            driver: requisitionItem.requisition.delivery.driver,
+            requisition: {
+              requisitionNo: requisitionItem.requisition.requisitionNo,
+              requisitionId: requisitionItem.requisition.id,
+              approvedBy: requisitionItem.requisition.approver,
+              approvedQty: requisitionItem.approvedQty,
+              requestedQty: requisitionItem.requestedQty,
+              siteName: requisitionItem.requisition.site.name,
+            },
+            temperatureAlertEvents: alertEvents.map((ae) => ({
+              id: ae.id,
+              eventNo: ae.eventNo,
+              alertType: ae.alertType,
+              minTemperature: ae.minTemperature,
+              maxTemperature: ae.maxTemperature,
+              firstAlertAt: ae.firstAlertAt,
+              lastAlertAt: ae.lastAlertAt,
+              resolvedAt: ae.resolvedAt,
+              recoveredAt: ae.recoveredAt,
+              recoveredTemperature: ae.recoveredTemperature,
+              durationMinutes: ae.durationMinutes,
+              logCount: ae.logCount,
+              affectedBatchIds: ae.affectedBatchIds,
+              status: ae.status,
+              handlingStatus: ae.handlingStatus,
+              handlingRemark: ae.handlingRemark,
+              handledAt: ae.handledAt,
+              handledBy: ae.handler,
+              emergencyOrder: ae.emergencyOrder
+                ? { id: ae.emergencyOrder.id, orderNo: ae.emergencyOrder.orderNo, type: ae.emergencyOrder.type, status: ae.emergencyOrder.status }
+                : null,
             })),
-            requisitionNo: deliveryInfo.requisition.requisitionNo,
+            emergencyOrders,
           }
         : null,
+      temperatureSafety: {
+        status: temperatureSafetyStatus,
+        hasAlert: hasAnyAlert,
+        hasActiveAlert,
+        recovered: !hasActiveAlert && hasAnyAlert,
+        allowUse,
+        description:
+          temperatureSafetyStatus === 'SAFE' ? '运输过程无温度异常，可安全使用' :
+          temperatureSafetyStatus === 'RECOVERED' ? '曾发生温度异常，但已恢复并完成处置，可使用' :
+          temperatureSafetyStatus === 'PENDING_REVIEW' ? '曾发生温度异常，已恢复但尚未复核，建议等待审核结论' :
+          '当前正处于温度异常中，禁止使用',
+      },
       fullTimeline: batchTrace.timeline,
       hasAdverseReaction: !!record.adverseReaction,
       adverseReaction: record.adverseReaction

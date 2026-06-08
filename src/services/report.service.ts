@@ -83,12 +83,14 @@ class ReportService {
       return report;
     }
 
-    const vaccinatedCount = await prisma.vaccinationRecord.count({
-      where: {
-        administrationDate: { gte: dayStart, lte: dayEnd },
-        ...(siteIds.length > 0 ? { siteId: { in: siteIds } } : {}),
-      },
-    });
+    const vaccinatedCount = (siteIds.length > 0 || !region)
+      ? await prisma.vaccinationRecord.count({
+          where: {
+            administrationDate: { gte: dayStart, lte: dayEnd },
+            ...(siteIds.length > 0 ? { siteId: { in: siteIds } } : {}),
+          },
+        })
+      : 0;
 
     const totalUsedQty = vaccinatedCount;
 
@@ -140,12 +142,14 @@ class ReportService {
       ? (totalScrappedQty / (totalUsedQty + totalScrappedQty)) * 100
       : 0;
 
-    const adverseCount = await prisma.adverseReactionReport.count({
-      where: {
-        reportDate: { gte: dayStart, lte: dayEnd },
-        vaccinationRecord: siteIds.length > 0 ? { siteId: { in: siteIds } } : undefined,
-      } as any,
-    });
+    const adverseCount = (siteIds.length > 0 || !region)
+      ? await prisma.adverseReactionReport.count({
+          where: {
+            reportDate: { gte: dayStart, lte: dayEnd },
+            vaccinationRecord: siteIds.length > 0 ? { siteId: { in: siteIds } } : undefined,
+          } as any,
+        })
+      : 0;
 
     const adverseRate = vaccinatedCount > 0 ? (adverseCount / vaccinatedCount) * 100 : 0;
 

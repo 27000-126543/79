@@ -140,6 +140,7 @@ model User {
   operatedInventoryLogs InventoryLog[]
   scrappedRecords ScrappedRecord[]
   drivenDeliveries Delivery[]
+  handledTemperatureAlerts TemperatureAlertEvent[] @relation("Handler")
 }
 
 model Child {
@@ -555,6 +556,8 @@ model TemperatureAlertEvent {
   firstAlertAt      DateTime
   lastAlertAt       DateTime
   resolvedAt        DateTime?
+  recoveredAt       DateTime?
+  recoveredTemperature Float?
   durationMinutes   Int                            @default(0)
   logCount          Int                            @default(1)
   affectedBatchIds  Json?
@@ -562,12 +565,16 @@ model TemperatureAlertEvent {
   handlingStatus    TemperatureAlertHandlingStatus @default(PENDING)
   emergencyOrderId  String?
   remark            String?
+  handledBy         String?
+  handledAt         DateTime?
+  handlingRemark    String?
   createdAt         DateTime                       @default(now())
   updatedAt         DateTime                       @default(now())
 
   delivery          Delivery                       @relation(fields: [deliveryId], references: [id])
   emergencyOrder    EmergencyOrder?                @relation(fields: [emergencyOrderId], references: [id])
   temperatureLogs   TemperatureLog[]
+  handler           User?                          @relation("Handler", fields: [handledBy], references: [id])
 }
 
 model InventoryLog {
