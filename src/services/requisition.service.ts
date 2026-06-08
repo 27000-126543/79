@@ -231,7 +231,7 @@ class RequisitionService {
       for (const item of data.items) {
         await tx.requisitionItem.update({
           where: { id: item.requisitionItemId },
-          data: { approvedQty: item.approvedQty, deliveredQty: 0 },
+          data: { approvedQty: item.approvedQty, deliveredQty: 0, batchId: item.batchId ?? null },
         });
 
         if (item.approvedQty > 0 && item.batchId) {
@@ -271,7 +271,7 @@ class RequisitionService {
         where: { id: requisitionId },
         data: { status: 'APPROVED', approvedBy: approverId, vehicleId: data.vehicleId, deliveryId: delivery.id },
         include: {
-          items: { include: { vaccine: true } },
+          items: { include: { vaccine: true, batch: true } },
           site: true,
           delivery: true,
           approver: { select: { id: true, name: true } },
