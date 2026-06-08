@@ -359,7 +359,11 @@ class TraceabilityService {
     const batchTrace = await this.getBatchTraceability(undefined, record.batchId);
 
     const requisitionItem = await prisma.requisitionItem.findFirst({
-      where: { batchId: record.batchId },
+      where: {
+        batchId: record.batchId,
+        requisition: { siteId: record.siteId, status: { in: ['APPROVED', 'DELIVERED'] } },
+      },
+      orderBy: { createdAt: 'desc' },
       include: {
         requisition: {
           include: {
@@ -380,11 +384,18 @@ class TraceabilityService {
       },
     });
 
-    const alertEvents = requisitionItem?.requisition?.delivery?.temperatureAlertEvents ?? [];
-    const hasActiveAlert = alertEvents.some((e) => e.status === 'ACTIVE');
-    const hasAnyAlert = alertEvents.length > 0;
-    const latestClosedHandling = alertEvents.find((e) => e.handlingStatus === 'CLOSED' || e.handlingStatus === 'ACTION_TAKEN');
-    const emergencyOrders = alertEvents
+    const allAlertEvents = requisitionItem?.requisition?.delivery?.temperatureAlertEvents ?? [];
+
+    const affectingAlertEvents = allAlertEvents.filter((e) => {
+      const affected = e.affectedBatchIds as unknown as string[] | null | undefined;
+      if (!affected || affected.length === 0) return true;
+      return affected.includes(record.batchId);
+    });
+
+    const hasActiveAlert = affectingAlertEvents.some((e) => e.status === 'ACTIVE');
+    const hasAnyAlert = affectingAlertEvents.length > 0;
+    const latestClosedHandling = affectingAlertEvents.find((e) => e.handlingStatus === 'CLOSED' || e.handlingStatus === 'ACTION_TAKEN');
+    const emergencyOrders = affectingAlertEvents
       .filter((e) => !!e.emergencyOrder)
       .map((e) => e.emergencyOrder) as any[];
     const allowUse = !hasActiveAlert;
@@ -392,6 +403,8 @@ class TraceabilityService {
       !hasAnyAlert ? 'SAFE' :
       hasActiveAlert ? 'RISK_ACTIVE' :
       latestClosedHandling ? 'RECOVERED' : 'PENDING_REVIEW';
+
+    const otherBatchAlerts = allAlertEvents.length - affectingAlertEvents.length;
 
     return {
       certificate: {
@@ -433,7 +446,7 @@ class TraceabilityService {
               requestedQty: requisitionItem.requestedQty,
               siteName: requisitionItem.requisition.site.name,
             },
-            temperatureAlertEvents: alertEvents.map((ae) => ({
+            temperatureAlertEvents: affectingAlertEvents.map((ae) => ({
               id: ae.id,
               eventNo: ae.eventNo,
               alertType: ae.alertType,
@@ -465,11 +478,15 @@ class TraceabilityService {
         hasActiveAlert,
         recovered: !hasActiveAlert && hasAnyAlert,
         allowUse,
+        otherBatchAlertsOnSameDelivery: otherBatchAlerts,
         description:
-          temperatureSafetyStatus === 'SAFE' ? '运输过程无温度异常，可安全使用' :
-          temperatureSafetyStatus === 'RECOVERED' ? '曾发生温度异常，但已恢复并完成处置，可使用' :
-          temperatureSafetyStatus === 'PENDING_REVIEW' ? '曾发生温度异常，已恢复但尚未复核，建议等待审核结论' :
-          '当前正处于温度异常中，禁止使用',
+          temperatureSafetyStatus === 'SAFE'
+            ? '运输过程无影响本批次的温度异常，可安全使用'
+            : temperatureSafetyStatus === 'RECOVERED'
+              ? '本批次曾发生温度异常，但已恢复并完成处置，可使用'
+              : temperatureSafetyStatus === 'PENDING_REVIEW'
+                ? '本批次曾发生温度异常，已恢复但尚未复核，建议等待审核结论'
+                : '本批次当前正处于温度异常中，禁止使用',
       },
       fullTimeline: batchTrace.timeline,
       hasAdverseReaction: !!record.adverseReaction,

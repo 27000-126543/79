@@ -329,7 +329,7 @@ class RequisitionService {
         skip,
         take: pageSize,
         include: {
-          items: { include: { vaccine: true } },
+          items: { include: { vaccine: true, batch: true } },
           site: true,
           vehicle: true,
           delivery: true,

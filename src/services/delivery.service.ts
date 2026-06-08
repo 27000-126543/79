@@ -516,21 +516,10 @@ class DeliveryService {
           });
         }
 
-        const remainingQty = batch.availableQuantity - item.approvedQty;
-        if (remainingQty > 0) {
-          await tx.vaccineBatch.update({
-            where: { id: item.batchId },
-            data: {
-              availableQuantity: remainingQty,
-              status: remainingQty > 0 ? batch.status : 'NORMAL',
-            },
-          });
-        } else {
-          await tx.vaccineBatch.update({
-            where: { id: item.batchId },
-            data: { availableQuantity: 0, status: 'NORMAL' },
-          });
-        }
+        await tx.vaccineBatch.update({
+          where: { id: item.batchId },
+          data: { status: 'NORMAL' },
+        });
 
         await tx.requisitionItem.update({
           where: { id: item.id },
