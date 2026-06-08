@@ -1,0 +1,584 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  CDC_ADMIN
+  VACCINATION_STAFF
+  WAREHOUSE_STAFF
+  DELIVERY_STAFF
+  PARENT
+  AUDITOR
+  DRUG_ADMIN
+}
+
+enum VaccineType {
+  LIVE_ATTENUATED
+  INACTIVATED
+  SUBUNIT
+  TOXOID
+  mRNA
+}
+
+enum TemperatureZone {
+  ULTRA_LOW
+  REFRIGERATED
+  FROZEN
+  ROOM_TEMP
+}
+
+enum InventoryStatus {
+  NORMAL
+  NEAR_EXPIRY
+  LOCKED
+  EXPIRED
+  SCRAPPED
+  IN_TRANSIT
+  ALLOCATED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  VACCINATED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AdverseReactionSeverity {
+  MILD
+  MODERATE
+  SEVERE
+  LIFE_THREATENING
+  FATAL
+}
+
+enum AdverseReactionStatus {
+  REPORTED
+  UNDER_REVIEW
+  INVESTIGATING
+  CONFIRMED
+  RESOLVED
+  CLOSED
+}
+
+enum EmergencyOrderType {
+  SUSPEND_USE
+  RETURN_SHIPMENT
+  RECALL
+}
+
+enum EmergencyOrderStatus {
+  CREATED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum NotificationType {
+  VACCINE_ARRIVED
+  INVENTORY_ALERT
+  TEMPERATURE_ALERT
+  APPOINTMENT_CONFIRMED
+  APPOINTMENT_REMINDER
+  VACCINATION_COMPLETED
+  ADVERSE_REACTION_REPORTED
+  EMERGENCY_ALERT
+  REPORT_READY
+}
+
+enum NotificationChannel {
+  APP_PUSH
+  SMS
+  EMAIL
+  SYSTEM
+}
+
+model User {
+  id             String   @id @default(cuid())
+  username       String   @unique
+  passwordHash   String
+  name           String
+  phone          String?
+  email          String?
+  role           UserRole
+  organization   String?
+  region         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now())
+
+  children       Child[]
+  createdAppointments Appointment[] @relation("AppointmentCreator")
+  administeredVaccinations VaccinationRecord[] @relation("VaccinationAdmin")
+  receivedNotifications Notification[]
+  auditTasks     AdverseReactionReport[] @relation("AssignedAuditor")
+  reportedAdverseReactions AdverseReactionReport[] @relation("Reporter")
+  inspectedEquipment EquipmentInspection[]
+  createdEmergencyOrders EmergencyOrder[]
+  receivedIncomingRecords IncomingRecord[]
+  requestedRequisitions VaccineRequisition[]
+  operatedInventoryLogs InventoryLog[]
+  scrappedRecords ScrappedRecord[]
+  drivenDeliveries Delivery[]
+}
+
+model Child {
+  id             String   @id @default(cuid())
+  parentId       String
+  name           String
+  gender         String
+  birthDate      DateTime
+  idCard         String?  @unique
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now())
+
+  parent         User     @relation(fields: [parentId], references: [id])
+  appointments   Appointment[]
+  vaccinations   VaccinationRecord[]
+  immunizationPlans ChildImmunizationPlan[]
+}
+
+model VaccineCatalog {
+  id                 String   @id @default(cuid())
+  code               String   @unique
+  name               String
+  manufacturer       String
+  type               VaccineType
+  temperatureZone    TemperatureZone
+  minTemperature     Float
+  maxTemperature     Float
+  standardDoseCount  Int
+  doseIntervalDays   Int
+  suitableAgeMonths  Int
+  maxAgeMonths       Int?
+  description        String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @default(now())
+
+  batches            VaccineBatch[]
+  immunizationPlans  ImmunizationPlan[]
+  requisitionItems   RequisitionItem[]
+  appointments       Appointment[]
+  vaccinationRecords VaccinationRecord[]
+}
+
+model ImmunizationPlan {
+  id            String   @id @default(cuid())
+  vaccineId     String
+  doseNumber    Int
+  minAgeMonths  Int
+  maxAgeMonths  Int?
+  intervalDays  Int
+  createdAt     DateTime @default(now())
+
+  vaccine       VaccineCatalog @relation(fields: [vaccineId], references: [id])
+  childPlans    ChildImmunizationPlan[]
+  appointments  Appointment[]
+}
+
+model ChildImmunizationPlan {
+  id                 String   @id @default(cuid())
+  childId            String
+  planId             String
+  status             String
+  scheduledDate      DateTime?
+  completedDate      DateTime?
+  vaccinationRecordId String?  @unique
+  createdAt          DateTime @default(now())
+
+  child              Child              @relation(fields: [childId], references: [id])
+  plan               ImmunizationPlan   @relation(fields: [planId], references: [id])
+  vaccinationRecord  VaccinationRecord? @relation(fields: [vaccinationRecordId], references: [id])
+}
+
+model ColdStorage {
+  id            String   @id @default(cuid())
+  name          String
+  location      String
+  temperatureZone TemperatureZone
+  totalSlots    Int
+  usedSlots     Int      @default(0)
+  status        String
+  region        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now())
+
+  slots         StorageSlot[]
+  equipment     ColdChainEquipment[]
+}
+
+model StorageSlot {
+  id            String   @id @default(cuid())
+  coldStorageId String
+  slotCode      String
+  temperatureZone TemperatureZone
+  isOccupied    Boolean  @default(false)
+  currentBatchId String?  @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now())
+
+  coldStorage   ColdStorage @relation(fields: [coldStorageId], references: [id])
+  currentBatch  VaccineBatch? @relation(fields: [currentBatchId], references: [id])
+}
+
+model ColdChainEquipment {
+  id              String   @id @default(cuid())
+  coldStorageId   String?
+  vehicleId       String?
+  equipmentType   String
+  model           String
+  serialNumber    String   @unique
+  temperatureZone TemperatureZone
+  status          String
+  lastCalibration DateTime?
+  lastMaintenance DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  coldStorage     ColdStorage? @relation(fields: [coldStorageId], references: [id])
+  vehicle         DeliveryVehicle? @relation(fields: [vehicleId], references: [id])
+  inspections     EquipmentInspection[]
+  temperatureLogs TemperatureLog[]
+}
+
+model EquipmentInspection {
+  id            String   @id @default(cuid())
+  equipmentId   String
+  inspectorId   String
+  inspectionDate DateTime
+  temperature   Float
+  humidity      Float?
+  result        String
+  remarks       String?
+  createdAt     DateTime @default(now())
+
+  equipment     ColdChainEquipment @relation(fields: [equipmentId], references: [id])
+  inspector     User               @relation(fields: [inspectorId], references: [id])
+}
+
+model VaccineBatch {
+  id                String   @id @default(cuid())
+  vaccineId         String
+  batchNumber       String   @unique
+  manufactureDate   DateTime
+  expiryDate        DateTime
+  totalQuantity     Int
+  availableQuantity Int
+  minTemperature    Float
+  maxTemperature    Float
+  temperatureZone   TemperatureZone
+  status            InventoryStatus @default(NORMAL)
+  lotApprovalNumber String?
+  issuer            String?
+  storageSlotId     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @default(now())
+
+  vaccine           VaccineCatalog  @relation(fields: [vaccineId], references: [id])
+  storageSlot       StorageSlot?
+  incomingRecords   IncomingRecord[]
+  inventoryLogs     InventoryLog[]
+  temperatureLogs   TemperatureLog[]
+  vaccinations      VaccinationRecord[]
+  siteStock         InventoryStock[]
+  emergencyOrders   EmergencyOrder[]
+  scrappedRecords   ScrappedRecord[]
+}
+
+model IncomingRecord {
+  id              String   @id @default(cuid())
+  batchId         String
+  receivedBy      String
+  receivedDate    DateTime @default(now())
+  batchApprovalNo String
+  quantity        Int
+  inspectionResult String
+  equipmentData   Json?
+  remarks         String?
+  createdAt       DateTime @default(now())
+
+  batch           VaccineBatch @relation(fields: [batchId], references: [id])
+  receiver        User         @relation(fields: [receivedBy], references: [id])
+}
+
+model VaccinationSite {
+  id              String   @id @default(cuid())
+  name            String
+  address         String
+  region          String
+  contactPerson   String?
+  contactPhone    String?
+  dailyCapacity   Int
+  workingHours    Json?
+  status          String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  stock           InventoryStock[]
+  appointments    Appointment[]
+  vaccinations    VaccinationRecord[]
+  requisitions    VaccineRequisition[]
+}
+
+model InventoryStock {
+  id              String   @id @default(cuid())
+  siteId          String
+  batchId         String
+  quantity        Int
+  lockedQuantity  Int      @default(0)
+  status          InventoryStatus @default(NORMAL)
+  lastUpdated     DateTime @default(now())
+
+  site            VaccinationSite @relation(fields: [siteId], references: [id])
+  batch           VaccineBatch    @relation(fields: [batchId], references: [id])
+}
+
+model DeliveryVehicle {
+  id              String   @id @default(cuid())
+  plateNumber     String   @unique
+  temperatureZone TemperatureZone
+  minTemperature  Float
+  maxTemperature  Float
+  status          String
+  driverName      String?
+  driverPhone     String?
+  capacity        Int
+  region          String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  equipment       ColdChainEquipment[]
+  deliveries      Delivery[]
+  requisitions    VaccineRequisition[]
+}
+
+model VaccineRequisition {
+  id               String   @id @default(cuid())
+  requisitionNo    String   @unique
+  siteId           String
+  requestedBy      String
+  requestDate      DateTime @default(now())
+  status           String
+  recommendedQty   Json?
+  vehicleId        String?
+  deliveryId       String?  @unique
+  rejectionReason  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now())
+
+  site             VaccinationSite @relation(fields: [siteId], references: [id])
+  requester        User            @relation(fields: [requestedBy], references: [id])
+  items            RequisitionItem[]
+  vehicle          DeliveryVehicle? @relation(fields: [vehicleId], references: [id])
+  delivery         Delivery?       @relation(fields: [deliveryId], references: [id])
+}
+
+model RequisitionItem {
+  id             String   @id @default(cuid())
+  requisitionId  String
+  vaccineId      String
+  requestedQty   Int
+  recommendedQty Int
+  approvedQty    Int?
+  deliveredQty   Int?
+  createdAt      DateTime @default(now())
+
+  requisition    VaccineRequisition @relation(fields: [requisitionId], references: [id])
+  vaccine        VaccineCatalog     @relation(fields: [vaccineId], references: [id])
+}
+
+model Delivery {
+  id              String   @id @default(cuid())
+  deliveryNo      String   @unique
+  requisitionId   String?  @unique
+  vehicleId       String
+  driverId        String?
+  departureTime   DateTime?
+  arrivalTime     DateTime?
+  status          String
+  origin          String
+  destination     String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  vehicle         DeliveryVehicle @relation(fields: [vehicleId], references: [id])
+  requisition     VaccineRequisition?
+  driver          User?           @relation(fields: [driverId], references: [id])
+  temperatureLogs TemperatureLog[]
+  emergencyOrders EmergencyOrder[]
+}
+
+model TemperatureLog {
+  id           String   @id @default(cuid())
+  timestamp    DateTime @default(now())
+  temperature  Float
+  equipmentId  String?
+  batchId      String?
+  deliveryId   String?
+  isAlert      Boolean  @default(false)
+  alertType    String?
+  createdAt    DateTime @default(now())
+
+  equipment    ColdChainEquipment? @relation(fields: [equipmentId], references: [id])
+  batch        VaccineBatch?       @relation(fields: [batchId], references: [id])
+  delivery     Delivery?           @relation(fields: [deliveryId], references: [id])
+}
+
+model Appointment {
+  id              String   @id @default(cuid())
+  appointmentNo   String   @unique
+  childId         String
+  siteId          String
+  vaccineId       String
+  planId          String?
+  appointmentDate DateTime
+  timeSlot        String
+  status          AppointmentStatus @default(PENDING)
+  createdBy       String
+  checkInTime     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  child           Child             @relation(fields: [childId], references: [id])
+  site            VaccinationSite   @relation(fields: [siteId], references: [id])
+  vaccine         VaccineCatalog    @relation(fields: [vaccineId], references: [id])
+  plan            ImmunizationPlan? @relation(fields: [planId], references: [id])
+  creator         User              @relation("AppointmentCreator", fields: [createdBy], references: [id])
+  vaccinationRecord VaccinationRecord?
+}
+
+model VaccinationRecord {
+  id                 String   @id @default(cuid())
+  certificateNo      String   @unique
+  appointmentId      String?  @unique
+  childId            String
+  siteId             String
+  vaccineId          String
+  batchId            String
+  administeredBy     String
+  administrationDate DateTime @default(now())
+  doseNumber         Int
+  nextVaccinationDate DateTime?
+  siteReaction       String?
+  systemicReaction   String?
+  remarks            String?
+  createdAt          DateTime @default(now())
+
+  appointment        Appointment?        @relation(fields: [appointmentId], references: [id])
+  child              Child               @relation(fields: [childId], references: [id])
+  site               VaccinationSite     @relation(fields: [siteId], references: [id])
+  vaccine            VaccineCatalog      @relation(fields: [vaccineId], references: [id])
+  batch              VaccineBatch        @relation(fields: [batchId], references: [id])
+  administrator      User                @relation("VaccinationAdmin", fields: [administeredBy], references: [id])
+  adverseReaction    AdverseReactionReport?
+  childImmunizationPlan ChildImmunizationPlan?
+}
+
+model AdverseReactionReport {
+  id               String   @id @default(cuid())
+  reportNo         String   @unique
+  vaccinationRecordId String @unique
+  reporterId       String
+  reportDate       DateTime @default(now())
+  severity         AdverseReactionSeverity
+  symptoms         Json
+  onsetDate        DateTime
+  description      String?
+  status           AdverseReactionStatus @default(REPORTED)
+  assignedAuditorId String?
+  investigationData Json?
+  conclusion       String?
+  notifiedDrugAdmin Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @default(now())
+
+  vaccinationRecord VaccinationRecord @relation(fields: [vaccinationRecordId], references: [id])
+  reporter          User              @relation("Reporter", fields: [reporterId], references: [id])
+  assignedAuditor   User?             @relation("AssignedAuditor", fields: [assignedAuditorId], references: [id])
+}
+
+model EmergencyOrder {
+  id           String   @id @default(cuid())
+  orderNo      String   @unique
+  type         EmergencyOrderType
+  deliveryId   String
+  batchId      String?
+  reason       String
+  status       EmergencyOrderStatus @default(CREATED)
+  createdBy    String
+  notifiedCDC  Boolean  @default(false)
+  notifiedSite Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now())
+
+  delivery     Delivery @relation(fields: [deliveryId], references: [id])
+  batch        VaccineBatch? @relation(fields: [batchId], references: [id])
+  creator      User     @relation(fields: [createdBy], references: [id])
+}
+
+model InventoryLog {
+  id           String   @id @default(cuid())
+  batchId      String
+  action       String
+  quantity     Int
+  location     String?
+  operatorId   String
+  reason       String?
+  timestamp    DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  batch        VaccineBatch @relation(fields: [batchId], references: [id])
+  operator     User         @relation(fields: [operatorId], references: [id])
+}
+
+model ScrappedRecord {
+  id           String   @id @default(cuid())
+  scrapNo      String   @unique
+  batchId      String
+  quantity     Int
+  reason       String
+  scrappedBy   String
+  scrapDate    DateTime @default(now())
+  witness      String?
+  disposalMethod String?
+  createdAt    DateTime @default(now())
+
+  batch        VaccineBatch @relation(fields: [batchId], references: [id])
+  scrappedByUser User @relation(fields: [scrappedBy], references: [id])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  content   String
+  channel   NotificationChannel
+  isRead    Boolean  @default(false)
+  readAt    DateTime?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+model DailyReport {
+  id              String   @id @default(cuid())
+  reportDate      DateTime
+  region          String?
+  siteId          String?
+  totalVaccinated Int      @default(0)
+  lossRate        Float    @default(0)
+  adverseRate     Float    @default(0)
+  equipmentGoodRate Float  @default(0)
+  data            Json
+  createdAt       DateTime @default(now())
+
+  @@unique([reportDate, region, siteId])
+}
