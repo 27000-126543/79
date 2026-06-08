@@ -35,4 +35,26 @@ export const reportController = {
     const data = await reportService.getRealTimeStats(region as string | undefined, siteId as string | undefined);
     return success(res, data);
   },
+
+  async getExpiryRiskBoard(req: Request, res: Response) {
+    const { region, siteId } = req.query;
+    const data = await reportService.getExpiryRiskBoard(
+      region as string | undefined,
+      siteId as string | undefined
+    );
+    return success(res, data);
+  },
+
+  async exportExpiryRiskCsv(req: Request, res: Response) {
+    const { region, siteId } = req.query;
+    const filePath = await reportService.exportExpiryRiskCsv(
+      region as string | undefined,
+      siteId as string | undefined
+    );
+    const filename = filePath.split('/').pop();
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+  },
 };

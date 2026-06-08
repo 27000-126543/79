@@ -7,6 +7,7 @@ import { deliveryController } from '../controllers/delivery.controller';
 import { appointmentController } from '../controllers/appointment.controller';
 import { vaccinationController } from '../controllers/vaccination.controller';
 import { reportController } from '../controllers/report.controller';
+import { traceabilityController } from '../controllers/traceability.controller';
 import {
   childController,
   siteController,
@@ -83,5 +84,14 @@ router.post('/reports/daily/generate', requireRoles(UserRole.CDC_ADMIN), reportC
 router.get('/reports', reportController.getReports);
 router.get('/reports/export', reportController.exportCsv);
 router.get('/reports/stats/realtime', reportController.getRealTimeStats);
+router.get('/reports/expiry-risk', reportController.getExpiryRiskBoard);
+router.get('/reports/expiry-risk/export', reportController.exportExpiryRiskCsv);
+
+router.get('/traceability/batch', traceabilityController.getBatchTraceability);
+router.get('/traceability/certificate/:certificateNo', traceabilityController.getByCertificate);
+
+router.get('/deliveries/alert-events', deliveryController.listAlertEvents);
+router.get('/deliveries/alert-events/by-delivery', deliveryController.getDeliveryAlertEvents);
+router.put('/deliveries/alert-events/:id/status', requireRoles(UserRole.CDC_ADMIN), deliveryController.updateAlertEventStatus);
 
 export default router;

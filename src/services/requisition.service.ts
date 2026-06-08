@@ -269,11 +269,12 @@ class RequisitionService {
 
       const updated = await tx.vaccineRequisition.update({
         where: { id: requisitionId },
-        data: { status: 'APPROVED', vehicleId: data.vehicleId, deliveryId: delivery.id },
+        data: { status: 'APPROVED', approvedBy: approverId, vehicleId: data.vehicleId, deliveryId: delivery.id },
         include: {
           items: { include: { vaccine: true } },
           site: true,
           delivery: true,
+          approver: { select: { id: true, name: true } },
         },
       });
 

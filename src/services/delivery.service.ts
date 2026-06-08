@@ -4,10 +4,12 @@ import {
   EmergencyOrderType,
   EmergencyOrderStatus,
   NotificationType,
+  TemperatureAlertEventStatus,
 } from '@prisma/client';
 import { notificationService } from './notification.service';
 import { wsService } from './websocket.service';
 import { z } from 'zod';
+import { differenceInMinutes } from 'date-fns';
 
 export const temperatureLogSchema = z.object({
   deliveryId: z.string(),
@@ -67,14 +69,70 @@ class DeliveryService {
       },
     });
 
+    let alertEvent: any = null;
+
     if (alertCheck.isAlert) {
-      await this.handleTemperatureAlert(delivery.id, data.temperature, alertCheck.alertType!, alertCheck.threshold!);
+      alertEvent = await this.handleTemperatureAlert(
+        delivery.id,
+        data.temperature,
+        alertCheck.alertType!,
+        alertCheck.threshold!,
+        log.id,
+        data.batchId
+      );
+    } else {
+      await this.resolveOngoingAlertEventIfNeeded(delivery.id, log.id);
     }
 
-    return { log, alertCheck };
+    return { log, alertCheck, alertEvent };
   }
 
-  async handleTemperatureAlert(deliveryId: string, temperature: number, alertType: string, threshold: { min: number; max: number }) {
+  private async resolveOngoingAlertEventIfNeeded(deliveryId: string, logId: string) {
+    const activeEvent = await prisma.temperatureAlertEvent.findFirst({
+      where: { deliveryId, status: TemperatureAlertEventStatus.ACTIVE },
+      orderBy: { firstAlertAt: 'desc' },
+    });
+    if (!activeEvent) return;
+
+    const resolvedAt = new Date();
+    const durationMinutes = Math.max(0, differenceInMinutes(resolvedAt, activeEvent.firstAlertAt));
+
+    await prisma.temperatureAlertEvent.update({
+      where: { id: activeEvent.id },
+      data: {
+        status: TemperatureAlertEventStatus.RESOLVED,
+        resolvedAt,
+        durationMinutes,
+        lastAlertAt: resolvedAt,
+        temperatureLogs: { connect: { id: logId } },
+      },
+    });
+
+    wsService.sendStatusChange('temperature_alert_event', activeEvent.id, 'RESOLVED', {
+      eventNo: activeEvent.eventNo,
+      deliveryId,
+      resolvedAt,
+      durationMinutes,
+    });
+
+    if (activeEvent.emergencyOrderId) {
+      await notificationService.notifyCDC(
+        NotificationType.TEMPERATURE_ALERT,
+        '冷链运输温度已恢复正常',
+        `配送${deliveryId}温度恢复正常，异常持续${durationMinutes}分钟，事件号${activeEvent.eventNo}`,
+        { deliveryId, eventId: activeEvent.id, eventNo: activeEvent.eventNo, durationMinutes }
+      );
+    }
+  }
+
+  async handleTemperatureAlert(
+    deliveryId: string,
+    temperature: number,
+    alertType: string,
+    threshold: { min: number; max: number },
+    logId: string,
+    batchId?: string
+  ) {
     const delivery = await prisma.delivery.findUnique({
       where: { id: deliveryId },
       include: {
@@ -82,40 +140,221 @@ class DeliveryService {
         requisition: { include: { site: true, items: { include: { vaccine: true } } } },
       },
     });
-    if (!delivery) return;
+    if (!delivery) return null;
 
-    const order = await this.createEmergencyOrder({
-      deliveryId,
-      type: alertType === 'LOW_TEMPERATURE' || alertType === 'HIGH_TEMPERATURE'
-        ? EmergencyOrderType.SUSPEND_USE
-        : EmergencyOrderType.RETURN_SHIPMENT,
-      reason: `温度异常：当前${temperature}°C，阈值范围${threshold.min}°C~${threshold.max}°C`,
-      batchId: undefined,
-    }, 'system');
+    const now = new Date();
+    const affectedBatchIds = batchId
+      ? [batchId]
+      : delivery.requisition?.items.filter((i) => i.batchId).map((i) => i.batchId as string) || [];
 
-    wsService.sendStatusChange('delivery', deliveryId, 'TEMPERATURE_ALERT', {
-      temperature,
-      threshold,
-      alertType,
-      emergencyOrderNo: (order as { orderNo: string }).orderNo,
+    let existingActiveEvent = await prisma.temperatureAlertEvent.findFirst({
+      where: {
+        deliveryId,
+        alertType,
+        status: TemperatureAlertEventStatus.ACTIVE,
+      },
+      orderBy: { firstAlertAt: 'desc' },
     });
 
-    if (delivery.requisition?.site.region) {
-      await notificationService.notifyVaccinationSite(
-        delivery.requisition.site.region,
+    let event: any;
+
+    if (existingActiveEvent) {
+      const durationMinutes = Math.max(0, differenceInMinutes(now, existingActiveEvent.firstAlertAt));
+      event = await prisma.temperatureAlertEvent.update({
+        where: { id: existingActiveEvent.id },
+        data: {
+          minTemperature: Math.min(existingActiveEvent.minTemperature, temperature),
+          maxTemperature: Math.max(existingActiveEvent.maxTemperature, temperature),
+          lastAlertAt: now,
+          durationMinutes,
+          logCount: { increment: 1 },
+          temperatureLogs: { connect: { id: logId } },
+        },
+        include: { emergencyOrder: true },
+      });
+
+      wsService.sendStatusChange('temperature_alert_event', event.id, 'UPDATED', {
+        eventNo: event.eventNo,
+        deliveryId,
+        temperature,
+        minTemperature: event.minTemperature,
+        maxTemperature: event.maxTemperature,
+        durationMinutes,
+        logCount: event.logCount,
+      });
+    } else {
+      const eventNo = `TAE${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+      const order = await this.createEmergencyOrder(
+        {
+          deliveryId,
+          type: alertType === 'LOW_TEMPERATURE' || alertType === 'HIGH_TEMPERATURE'
+            ? EmergencyOrderType.SUSPEND_USE
+            : EmergencyOrderType.RETURN_SHIPMENT,
+          reason: `温度异常：当前${temperature}°C，阈值范围${threshold.min}°C~${threshold.max}°C`,
+          batchId: undefined,
+        },
+        'system'
+      );
+
+      event = await prisma.temperatureAlertEvent.create({
+        data: {
+          eventNo,
+          deliveryId,
+          alertType,
+          minTemperature: temperature,
+          maxTemperature: temperature,
+          firstAlertAt: now,
+          lastAlertAt: now,
+          durationMinutes: 0,
+          logCount: 1,
+          affectedBatchIds: affectedBatchIds as any,
+          status: TemperatureAlertEventStatus.ACTIVE,
+          emergencyOrderId: (order as { id: string }).id,
+          temperatureLogs: { connect: { id: logId } },
+        },
+        include: { emergencyOrder: true },
+      });
+
+      wsService.sendStatusChange('delivery', deliveryId, 'TEMPERATURE_ALERT', {
+        temperature,
+        threshold,
+        alertType,
+        eventNo,
+        emergencyOrderNo: (order as { orderNo: string }).orderNo,
+      });
+
+      wsService.sendStatusChange('temperature_alert_event', event.id, 'CREATED', {
+        eventNo,
+        deliveryId,
+        temperature,
+        threshold,
+        alertType,
+        emergencyOrderNo: (order as { orderNo: string }).orderNo,
+      });
+
+      if (delivery.requisition?.site.region) {
+        await notificationService.notifyVaccinationSite(
+          delivery.requisition.site.region,
+          NotificationType.TEMPERATURE_ALERT,
+          '冷链运输温度告警',
+          `配送${delivery.deliveryNo}温度异常，事件号${eventNo}，当前${temperature}°C，已暂停使用并生成应急工单`,
+          { deliveryId, temperature, threshold, eventId: event.id, eventNo, emergencyOrderNo: (order as { orderNo: string }).orderNo }
+        );
+      }
+
+      await notificationService.notifyCDC(
         NotificationType.TEMPERATURE_ALERT,
         '冷链运输温度告警',
-        `配送${delivery.deliveryNo}温度异常，当前${temperature}°C，已暂停使用并生成应急工单`,
-        { deliveryId, temperature, threshold, emergencyOrderNo: (order as { orderNo: string }).orderNo }
+        `配送${delivery.deliveryNo}温度异常：${temperature}°C（阈值${threshold.min}~${threshold.max}），事件号${eventNo}`,
+        { deliveryId, temperature, threshold, eventId: event.id, eventNo, emergencyOrderNo: (order as { orderNo: string }).orderNo }
       );
     }
 
-    await notificationService.notifyCDC(
-      NotificationType.TEMPERATURE_ALERT,
-      '冷链运输温度告警',
-      `配送${delivery.deliveryNo}温度异常：${temperature}°C（阈值${threshold.min}~${threshold.max}）`,
-      { deliveryId, temperature, threshold, emergencyOrderNo: (order as { orderNo: string }).orderNo }
-    );
+    return event;
+  }
+
+  async getDeliveryAlertEvents(deliveryId: string) {
+    const events = await prisma.temperatureAlertEvent.findMany({
+      where: { deliveryId },
+      include: {
+        delivery: { include: { vehicle: true, requisition: { include: { site: true } } } },
+        emergencyOrder: true,
+        temperatureLogs: { orderBy: { timestamp: 'asc' } },
+      },
+      orderBy: { firstAlertAt: 'desc' },
+    });
+    return events.map((e) => ({
+      id: e.id,
+      eventNo: e.eventNo,
+      alertType: e.alertType,
+      minTemperature: e.minTemperature,
+      maxTemperature: e.maxTemperature,
+      firstAlertAt: e.firstAlertAt,
+      lastAlertAt: e.lastAlertAt,
+      resolvedAt: e.resolvedAt,
+      durationMinutes: e.resolvedAt
+        ? Math.max(0, differenceInMinutes(e.resolvedAt, e.firstAlertAt))
+        : e.durationMinutes,
+      logCount: e.logCount,
+      affectedBatchIds: e.affectedBatchIds,
+      status: e.status,
+      handlingStatus: e.handlingStatus,
+      remark: e.remark,
+      emergencyOrder: e.emergencyOrder
+        ? { id: e.emergencyOrder.id, orderNo: e.emergencyOrder.orderNo, type: e.emergencyOrder.type, status: e.emergencyOrder.status }
+        : null,
+      delivery: e.delivery
+        ? { id: e.delivery.id, deliveryNo: e.delivery.deliveryNo, plateNumber: e.delivery.vehicle.plateNumber, siteName: e.delivery.requisition?.site.name }
+        : null,
+      alertLogsCount: e.temperatureLogs.length,
+    }));
+  }
+
+  async listAlertEvents(status?: string, page = 1, pageSize = 20) {
+    const skip = (page - 1) * pageSize;
+    const where: any = {};
+    if (status) where.status = status;
+
+    const [records, total] = await Promise.all([
+      prisma.temperatureAlertEvent.findMany({
+        where,
+        skip,
+        take: pageSize,
+        include: {
+          delivery: { include: { vehicle: true, requisition: { include: { site: true } } } },
+          emergencyOrder: true,
+        },
+        orderBy: { firstAlertAt: 'desc' },
+      }),
+      prisma.temperatureAlertEvent.count({ where }),
+    ]);
+
+    return { records, total, page, pageSize };
+  }
+
+  async updateAlertEventHandlingStatus(
+    eventId: string,
+    handlingStatus: string,
+    operatorId: string,
+    remark?: string
+  ) {
+    const event = await prisma.temperatureAlertEvent.findUnique({
+      where: { id: eventId },
+    });
+    if (!event) throw new AppError('温度异常事件不存在', 404);
+
+    const deliveryInfo = await prisma.delivery.findUnique({
+      where: { id: event.deliveryId },
+      include: { requisition: { include: { site: true } } },
+    });
+
+    const data: any = { handlingStatus };
+    if (remark !== undefined) data.remark = remark;
+
+    const updated = await prisma.temperatureAlertEvent.update({
+      where: { id: eventId },
+      data,
+      include: { emergencyOrder: true },
+    });
+
+    wsService.sendStatusChange('temperature_alert_event', eventId, handlingStatus, {
+      eventNo: event.eventNo,
+      handlingStatus,
+      remark,
+    });
+
+    if (deliveryInfo?.requisition?.site.region) {
+      await notificationService.notifyVaccinationSite(
+        deliveryInfo.requisition.site.region,
+        NotificationType.EMERGENCY_ALERT,
+        `温度异常事件处理状态更新：${handlingStatus}`,
+        `事件号${event.eventNo}处理状态已更新为${handlingStatus}`,
+        { eventId, eventNo: event.eventNo, handlingStatus }
+      );
+    }
+
+    return updated;
   }
 
   async createEmergencyOrder(data: z.infer<typeof emergencyOrderSchema>, createdBy: string) {

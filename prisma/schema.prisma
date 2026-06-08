@@ -93,6 +93,19 @@ enum NotificationType {
   REPORT_READY
 }
 
+enum TemperatureAlertEventStatus {
+  ACTIVE
+  RESOLVED
+  IGNORED
+}
+
+enum TemperatureAlertHandlingStatus {
+  PENDING
+  REVIEWED
+  ACTION_TAKEN
+  CLOSED
+}
+
 enum NotificationChannel {
   APP_PUSH
   SMS
@@ -122,7 +135,8 @@ model User {
   inspectedEquipment EquipmentInspection[]
   createdEmergencyOrders EmergencyOrder[]
   receivedIncomingRecords IncomingRecord[]
-  requestedRequisitions VaccineRequisition[]
+  requestedRequisitions VaccineRequisition[] @relation("Requester")
+  approvedRequisitions VaccineRequisition[] @relation("Approver")
   operatedInventoryLogs InventoryLog[]
   scrappedRecords ScrappedRecord[]
   drivenDeliveries Delivery[]
@@ -289,6 +303,7 @@ model VaccineBatch {
   siteStock         InventoryStock[]
   emergencyOrders   EmergencyOrder[]
   scrappedRecords   ScrappedRecord[]
+  requisitionItems  RequisitionItem[]
 }
 
 model IncomingRecord {
@@ -363,6 +378,7 @@ model VaccineRequisition {
   requisitionNo    String   @unique
   siteId           String
   requestedBy      String
+  approvedBy       String?
   requestDate      DateTime @default(now())
   status           String
   recommendedQty   Json?
@@ -373,7 +389,8 @@ model VaccineRequisition {
   updatedAt        DateTime @default(now())
 
   site             VaccinationSite @relation(fields: [siteId], references: [id])
-  requester        User            @relation(fields: [requestedBy], references: [id])
+  requester        User            @relation("Requester", fields: [requestedBy], references: [id])
+  approver         User?           @relation("Approver", fields: [approvedBy], references: [id])
   items            RequisitionItem[]
   vehicle          DeliveryVehicle? @relation(fields: [vehicleId], references: [id])
   delivery         Delivery?       @relation(fields: [deliveryId], references: [id])
@@ -383,6 +400,7 @@ model RequisitionItem {
   id             String   @id @default(cuid())
   requisitionId  String
   vaccineId      String
+  batchId        String?
   requestedQty   Int
   recommendedQty Int
   approvedQty    Int?
@@ -391,6 +409,7 @@ model RequisitionItem {
 
   requisition    VaccineRequisition @relation(fields: [requisitionId], references: [id])
   vaccine        VaccineCatalog     @relation(fields: [vaccineId], references: [id])
+  batch          VaccineBatch?      @relation(fields: [batchId], references: [id])
 }
 
 model Delivery {
@@ -412,6 +431,7 @@ model Delivery {
   driver          User?           @relation(fields: [driverId], references: [id])
   temperatureLogs TemperatureLog[]
   emergencyOrders EmergencyOrder[]
+  temperatureAlertEvents TemperatureAlertEvent[]
 }
 
 model TemperatureLog {
@@ -421,6 +441,7 @@ model TemperatureLog {
   equipmentId  String?
   batchId      String?
   deliveryId   String?
+  alertEventId String?
   isAlert      Boolean  @default(false)
   alertType    String?
   createdAt    DateTime @default(now())
@@ -428,6 +449,7 @@ model TemperatureLog {
   equipment    ColdChainEquipment? @relation(fields: [equipmentId], references: [id])
   batch        VaccineBatch?       @relation(fields: [batchId], references: [id])
   delivery     Delivery?           @relation(fields: [deliveryId], references: [id])
+  alertEvent   TemperatureAlertEvent? @relation(fields: [alertEventId], references: [id])
 }
 
 model Appointment {
@@ -520,6 +542,32 @@ model EmergencyOrder {
   delivery     Delivery @relation(fields: [deliveryId], references: [id])
   batch        VaccineBatch? @relation(fields: [batchId], references: [id])
   creator      User     @relation(fields: [createdBy], references: [id])
+  temperatureAlertEvents TemperatureAlertEvent[]
+}
+
+model TemperatureAlertEvent {
+  id                String                         @id @default(cuid())
+  eventNo           String                         @unique
+  deliveryId        String
+  alertType         String
+  minTemperature    Float
+  maxTemperature    Float
+  firstAlertAt      DateTime
+  lastAlertAt       DateTime
+  resolvedAt        DateTime?
+  durationMinutes   Int                            @default(0)
+  logCount          Int                            @default(1)
+  affectedBatchIds  Json?
+  status            TemperatureAlertEventStatus    @default(ACTIVE)
+  handlingStatus    TemperatureAlertHandlingStatus @default(PENDING)
+  emergencyOrderId  String?
+  remark            String?
+  createdAt         DateTime                       @default(now())
+  updatedAt         DateTime                       @default(now())
+
+  delivery          Delivery                       @relation(fields: [deliveryId], references: [id])
+  emergencyOrder    EmergencyOrder?                @relation(fields: [emergencyOrderId], references: [id])
+  temperatureLogs   TemperatureLog[]
 }
 
 model InventoryLog {

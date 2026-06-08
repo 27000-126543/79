@@ -71,4 +71,32 @@ export const deliveryController = {
     });
     return success(res, orders);
   },
+
+  async listAlertEvents(req: Request, res: Response) {
+    const page = parseInt(req.query.page as string) || 1;
+    const pageSize = parseInt(req.query.pageSize as string) || 20;
+    const status = req.query.status as string | undefined;
+    const data = await deliveryService.listAlertEvents(status, page, pageSize);
+    return success(res, data);
+  },
+
+  async getDeliveryAlertEvents(req: Request, res: Response) {
+    const deliveryId = req.query.deliveryId as string;
+    if (!deliveryId) return fail(res, '请提供配送单ID', 400);
+    const data = await deliveryService.getDeliveryAlertEvents(deliveryId);
+    return success(res, data);
+  },
+
+  async updateAlertEventStatus(req: Request, res: Response) {
+    const { handlingStatus, remark } = req.body;
+    if (!handlingStatus) return fail(res, '请提供处理状态', 400);
+    if (!req.user) return fail(res, '请先登录', 401);
+    const data = await deliveryService.updateAlertEventHandlingStatus(
+      req.params.id,
+      handlingStatus as string,
+      req.user.userId,
+      remark as string | undefined
+    );
+    return success(res, data, '处理状态已更新');
+  },
 };
